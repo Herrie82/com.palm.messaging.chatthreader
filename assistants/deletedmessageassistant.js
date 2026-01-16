@@ -16,13 +16,11 @@ var DeletedMessageCommandAssistant = Class.create({
 
 		future.then(this, function(future) {
 			var deletedList = future.result ? future.result.results : [];
-			this.conversationList = {};
+			var conversationHash = {};
 
 			if (deletedList !== undefined && deletedList.length > 0) {
 				console.info("DeletedMessageCommandAssistant:run() - deletedList.length = " + deletedList.length);
-				for (var i=0; i<deletedList.length; i++) {
-					//console.info("DeletedMessageCommandAssistant:run() - deletedList["+i+"] = " + JSON.stringify(deletedList[i]));					
-
+				for (var i = 0; i < deletedList.length; i++) {
 					// Update the revision so that the next watch will
 					// ignore this message.
 					if (deletedList[i]._rev > this.revision) {
@@ -30,23 +28,31 @@ var DeletedMessageCommandAssistant = Class.create({
 					}
 
 					// Create a hash of all the conversations in the deleted messages list
-					for (var x=0; x<deletedList[i].conversations.length; x++) {
-						this.conversationList[deletedList[i].conversations[x]] = deletedList[i].conversations[x];						
-					}					
-				}
-			} 
-
-			if (this.conversationList !== undefined) {
-				for (var conversation in this.conversationList) {
-					if(this.conversationList.hasOwnProperty(conversation)) {
-						future.nest(this.updateChatThread(this.conversationList[conversation]));							
-						delete this.conversationList[conversation];
+					// BUG FIX: Add null check for conversations array
+					var conversations = deletedList[i].conversations;
+					if (conversations && conversations.length > 0) {
+						for (var x = 0; x < conversations.length; x++) {
+							conversationHash[conversations[x]] = conversations[x];
+						}
 					}
-				}					
+				}
 			}
 
-		    future.result = true;
+			// BUG FIX: Use mapReduce to properly process all conversations asynchronously
+			// instead of broken for-in loop with future.nest()
+			var conversationIds = [];
+			for (var conversation in conversationHash) {
+				if (conversationHash.hasOwnProperty(conversation)) {
+					conversationIds.push(conversationHash[conversation]);
+				}
+			}
 
+			if (conversationIds.length > 0) {
+				var mapFunc = _.bind(this.updateChatThread, this);
+				future.nest(mapReduce({map: mapFunc}, conversationIds));
+			} else {
+				future.result = true;
+			}
 		});												
 	},
 

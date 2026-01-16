@@ -103,7 +103,7 @@ DBModels.Messages = {
 				{prop: "_del", op: "=", val: true},
 				{prop: "_rev", op: ">", val: revision}
 			],
-			orderBy: "_rev",
+			orderBy: "_rev"
 		};
 		return MojoDB.find(query);
 	},

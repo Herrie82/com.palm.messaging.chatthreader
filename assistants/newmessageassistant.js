@@ -24,11 +24,13 @@ var NewMessagesCommandAssistant = Class.create({
 			}
 		*/
 		// Each message can have multiple addresses so it can be associated with multiple conversations.
+		// Process ALL unthreaded messages, not just the first one
 		future.then(this, function(future) {
 			var messageList = future.result ? future.result.results : [];
-			console.info("NewMessagesCommandAssistant: number of unassociated mesages: " +messageList.length);
+			console.info("NewMessagesCommandAssistant: number of unassociated messages: " + messageList.length);
 			if (messageList !== undefined && messageList.length > 0) {
-				future.nest(this.handleMessage(messageList[0]));
+				var mapFunc = _.bind(this.handleMessage, this);
+				future.nest(mapReduce({map: mapFunc}, messageList));
 			} else {
 				future.result = true;
 			}
@@ -177,10 +179,11 @@ var NewMessagesCommandAssistant = Class.create({
 					} else {
 						future.nest(this.findPersonForAccount(myUsername, message.serviceName, results));
 					}
-				} else {
-					//result is empty or just a single person.
-					future.result = future.result;
+				} else if (results.length === 1) {
+					// Single person found - return it
+					future.result = results[0];
 				}
+				// else: empty results - future.result already contains empty array
 			});
 		}
 		return future;
@@ -238,7 +241,7 @@ var NewMessagesCommandAssistant = Class.create({
 	 ***********************************/	
 	convertAddressToObject: function (address) {
 		if (typeof address === "string") {
-			console.error("convertAddressToObject address is a stconvertAddressToObjectring. Converting to object");
+			console.error("convertAddressToObject address is a string. Converting to object");
 			address = {addr: address };
 		} else if (!address) {
 			console.error("convertAddressToObject address object is undefined, setting to 'No Recipients'");

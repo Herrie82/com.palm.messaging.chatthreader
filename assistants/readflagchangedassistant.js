@@ -84,7 +84,7 @@ var ReadFlagChangedCommandAssistant = Class.create({
 			where: [
 				{ prop: "conversations", op: "=", val: groupChat }
 			]
-		}
+		};
 		var future = MojoDB.find(query);
 		future.then(this, function(future) {
 			var messagesList = future.result ? future.result.results : [];

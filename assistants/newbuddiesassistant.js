@@ -15,7 +15,7 @@ var NewBuddiesCommandAssistant = Class.create({
 		
 		// Query for imbuddystatus records with an empty displayName
 		future.now(this, function(future) {
-			future.nest(DBModels.BuddyStatus.findNewBuddies(true));
+			future.nest(DBModels.BuddyStatus.findNewBuddies());
 		});
 
 		// Retrieved a list of imbuddystatus records
