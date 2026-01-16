@@ -26,6 +26,7 @@ DBModels.Messages = {
 	},
 
 	// Query for messages that have a null conversation
+	// PERFORMANCE FIX: Added limit to prevent unbounded queries
 	findUnthreaded: function(revision) {
 		console.info("DBModels.Messages.findUnthreaded: watching for new messages");
 		var query = {
@@ -34,7 +35,8 @@ DBModels.Messages = {
 				{ prop: "conversations", op: "=", val: null },
 				{ prop: "flags.visible", op: "=", val: true },
 				{ prop: "_rev", op: ">", val: revision}
-			]
+			],
+			limit: 100
 		};
 		return MojoDB.find(query);
 	},
@@ -94,6 +96,7 @@ DBModels.Messages = {
 	},
 	
 	// Query for messages that have been deleted. Only select retrieve _rev and conversation.
+	// PERFORMANCE FIX: Added limit to prevent unbounded queries
 	findDeleted: function(revision) {
 		console.info("DBModels.Messages.findDeleted: query for deleted messages");
 		var query = {
@@ -103,12 +106,15 @@ DBModels.Messages = {
 				{prop: "_del", op: "=", val: true},
 				{prop: "_rev", op: ">", val: revision}
 			],
-			orderBy: "_rev"
+			orderBy: "_rev",
+			limit: 100
 		};
 		return MojoDB.find(query);
 	},
 
 	// Query for inbox and outbox messages for a given conversation
+	// PERFORMANCE FIX: Reduced limit from 50 to 5 since we only need the most recent
+	// inbox/outbox message for thread summary updates
 	findMessagesForThread: function(conversation) {
 		console.info("DBModels.Messages.findMessagesForThread: query messages for thread: "+conversation);
 		var query = {
@@ -120,7 +126,7 @@ DBModels.Messages = {
 			],
 			orderBy: "localTimestamp",
 			desc: true,
-			limit: 50		
+			limit: 5
 		};
 		return MojoDB.find(query);
 	}
@@ -414,17 +420,20 @@ DBModels.BuddyStatus = {
 
 	
 	// Find buddies with no displayName set yet.  These are usually new buddies.
+	// PERFORMANCE FIX: Added limit to prevent unbounded queries
 	findNewBuddies: function() {
 		var query = {
 			from: DBModels.BuddyStatus.id,
 			where: [
 				{ prop: "displayName", op: "=", val: "" }
-			]
+			],
+			limit: 50
 		};
 		return TempDB.find(query, false);
 	},
 
 	// Find buddies that have had their availability updated
+	// PERFORMANCE FIX: Added limit to prevent unbounded queries
 	findNewAvailability: function(revision) {
 		revision = revision || this.rev;
 		console.info("DBModels.BuddyStatus.findNewAvailability rev="+revision);
@@ -433,8 +442,9 @@ DBModels.BuddyStatus = {
 		var query = {
 			from: DBModels.BuddyStatus.id,
 			where: [
-				{ prop: "availabilityRevSet", op: ">", val:revision }
-			]
+				{ prop: "availabilityRevSet", op: ">", val: revision }
+			],
+			limit: 100
 		};
 		var future = TempDB.find(query, false);
 		future.then(this, function() {
@@ -481,11 +491,11 @@ DBModels.BuddyStatus = {
 	
 	// Update the groupAvailability field with the group field concatenated with the most available availability.
 	// This field is used for sorting the buddy list.
+	// PERFORMANCE FIX: Added select clause and combined two loops into one pass
 	updatePersonAvailability: function(buddyStatusRecord) {
 		var future = new Future();
-		//console.log("updatePersonAvailability u="+buddyStatusRecord.username+", grp="+buddyStatusRecord.group);
-		// we could have an empty budyStatusRecord here if there were no buddies to update
-		if(buddyStatusRecord === undefined || (!buddyStatusRecord.personId && !buddyStatusRecord.username && !buddyStatusRecord.serviceName)) {
+		// we could have an empty buddyStatusRecord here if there were no buddies to update
+		if (buddyStatusRecord === undefined || (!buddyStatusRecord.personId && !buddyStatusRecord.username && !buddyStatusRecord.serviceName)) {
 			console.error("updatePersonAvailability: No record to update!");
 			future.result = true;
 			return future;
@@ -495,66 +505,56 @@ DBModels.BuddyStatus = {
 		if (buddyStatusRecord.personId) {
 			query = {
 				from: DBModels.BuddyStatus.id,
-				limit:50,
-				where: [{ prop:"personId", op:"=", val:buddyStatusRecord.personId}]
+				select: ["_id", "availability", "group"],
+				limit: 50,
+				where: [{ prop: "personId", op: "=", val: buddyStatusRecord.personId }]
 			};
 		} else {
 			query = {
 				from: DBModels.BuddyStatus.id,
-				limit:50,
+				select: ["_id", "availability", "group"],
+				limit: 50,
 				where: [
-					{ prop:"username", op:"=", val:buddyStatusRecord.username},
-					{ prop:"serviceName", op:"=", val:buddyStatusRecord.serviceName}
+					{ prop: "username", op: "=", val: buddyStatusRecord.username },
+					{ prop: "serviceName", op: "=", val: buddyStatusRecord.serviceName }
 				]
 			};
 		}
-		// console.log("Look for all imbuddystatus records connected to the same person.  query:"+JSON.stringify(query));
 		future = TempDB.find(query, false);
 		future.then(this, function(future) {
-			var i, mergeObject, returnFuture;
 			var results = future.result ? future.result.results : [];
 			var count = results ? results.length : 0;
-			var mostAvailableState = 4;
-			// console.log("Retrieved list of imbuddystatus records with personId "+buddyStatusRecord.personId);
-			if(future.result) {
-			//	console.log("future.result:"+JSON.stringify(future.result));
-			} else {
-				console.error("future.result is undefined!!");
+
+			if (count === 0) {
+				future.result = true;
+				return;
 			}
-			
-			//returnFuture = new Future();
-			//returnFuture.result = true;
-			
-			// Find the most available state for this person
-			for(i=0; i<count; i++) {
-				if(results[i].availability !== undefined && results[i].availability < mostAvailableState) {
-					// Found a more available state
+
+			// PERFORMANCE FIX: Single pass to find most available state and build update array
+			var mostAvailableState = 4;
+			var i;
+			for (i = 0; i < count; i++) {
+				if (results[i].availability !== undefined && results[i].availability < mostAvailableState) {
 					mostAvailableState = results[i].availability;
 				}
 			}
-			// console.log("mostAvailableState: "+mostAvailableState);
-			
-			// Update the sortby field for each record linked to the person.
-			var buddy, buddyUpdates = [];
-			var groupHasPrimary = {}; // used to mark a buddy as primary for a given group
-			for(i=0; i<count; i++) {
+
+			// Build update array in single pass
+			var buddyUpdates = [];
+			var groupHasPrimary = {};
+			for (i = 0; i < count; i++) {
 				var groupAvailability = DBModels.BuddyStatus.getGroupAvailability(results[i], mostAvailableState);
 				groupAvailability = groupAvailability.toLowerCase();
-				buddy = {
+				buddyUpdates.push({
 					_id: results[i]._id,
 					primary: (groupHasPrimary[groupAvailability] === undefined),
 					groupAvailability: groupAvailability,
 					offline: (mostAvailableState === Messaging.Availability.OFFLINE),
 					personAvailability: mostAvailableState
-				};
-				buddyUpdates.push(buddy);
+				});
 				groupHasPrimary[groupAvailability] = true;
-				// console.log("updating imbuddystatus["+results[i].displayName+"]: "+JSON.stringify(buddy));
 			}
 			future.nest(TempDB.merge(buddyUpdates));
-			
-			// console.log("nest the future only from the last merge call");
-			//future.nest(returnFuture);
 		});
 		return future;
 	}

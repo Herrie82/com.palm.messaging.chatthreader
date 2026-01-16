@@ -8,10 +8,12 @@ var ReadFlagChangedCommandAssistant = Class.create({
 	run: function(future) {
 		this.readRevision = this.controller.args.readRev || 0;
 		
-		// Get all the imgroupchat records that have flags.read changes  
+		// Get all the messages that have flags.read changes
 		future.now(this, function(future) {
+			// PERFORMANCE FIX: Only select fields needed for processing
 			var query = {
 				from: DBModels.Messages.id,
+				select: ["_id", "readRevSet", "conversations"],
 				where: [
 					{ prop: "readRevSet", op: ">", val: this.readRevision }
 				]
@@ -78,32 +80,32 @@ var ReadFlagChangedCommandAssistant = Class.create({
 		return PalmCall.call(activity._service, "complete", restartParams);
 	},
 	
-	updateChatThreads: function(groupChat) {
+	updateChatThreads: function(chatThreadId) {
+		// PERFORMANCE FIX: Only query for unread messages instead of all messages
+		// Only select fields needed for unread check to reduce data transfer
 		var query = {
 			from: DBModels.Messages.id,
+			select: ["_id", "flags", "folder"],
 			where: [
-				{ prop: "conversations", op: "=", val: groupChat }
+				{ prop: "conversations", op: "=", val: chatThreadId },
+				{ prop: "flags.read", op: "=", val: false },
+				{ prop: "folder", op: "=", val: "inbox" }
 			]
 		};
 		var future = MojoDB.find(query);
 		future.then(this, function(future) {
-			var messagesList = future.result ? future.result.results : [];
-			var unreadCount = 0;
-			messagesList.forEach(function(message) {
-				if (Messaging.Message.isUnread(message)) {
-					++unreadCount;
-				}
-			});
+			// Count is simply the number of results since we only queried unread inbox messages
+			var unreadCount = future.result && future.result.results ? future.result.results.length : 0;
 
-			console.info("ReadFlagChangedCommandAssistant.updateChatThreads chatId=" + groupChat + " unreadCount=" + unreadCount);
-			
+			console.info("ReadFlagChangedCommandAssistant.updateChatThreads chatId=" + chatThreadId + " unreadCount=" + unreadCount);
+
 			var chatThreadRecord = {
-				"_id": groupChat,
+				"_id": chatThreadId,
 				"unreadCount": unreadCount
 			};
 			future.nest(MojoDB.merge([chatThreadRecord]));
 		});
-		
+
 		return future;
 	}
 });
