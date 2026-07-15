@@ -6,6 +6,8 @@
 	{ "source": "prologue.js" },
 	{ "source": "models/dbmodels.js" },
 	{ "source": "models/imchatgroup.js" },
+	{ "source": "models/imserver.js" },
+	{ "source": "models/imchannel.js" },
 	{ "source": "models/utils.js" },
 	{ "source": "assistants/changedavailabilityassistant.js" },
 	{ "source": "assistants/groupchatdisplaynamechangedassistant.js" },

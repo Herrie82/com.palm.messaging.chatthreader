@@ -231,10 +231,120 @@ DBModels.Conversations = {
 	},
 	
 	/**
-	 * findOrCreate 
+	 * findOrCreateChannelThread (Servers/Rooms Milestone 1)
+	 * Route a channel (MUC) message to the single chatthread that represents its channel,
+	 * creating the imserver (guild/network) + imchannel (room) hierarchy and the channel's
+	 * chatthread on first sight. Mirrors the imgroupchat <-> chatthread 1:1 link, but driven
+	 * from the message tags instead of a separate transport-created record, so no extra db8
+	 * watch is needed. future.result = the channel's chatthread (with _id) or undefined on error.
+	 */
+	findOrCreateChannelThread: function(message) {
+		var serviceName = message.serviceName || "";
+		var channelAddr = message.channelName;
+		var serverRec, channelRec, targetConversation;
+
+		var future = new Future();
+		future.result = true;
+
+		// 1. Ensure the server (guild/network) record exists.
+		future.then(this, function(future) {
+			future.nest(DBModels.ImServer.findOrCreate(message));
+		});
+
+		// 2. Ensure the channel record exists under that server.
+		future.then(this, function(future) {
+			serverRec = future.result;
+			future.nest(DBModels.ImChannel.findOrCreate(message, serverRec && serverRec._id));
+		});
+
+		// 3. If the channel is already linked to a chatthread, fetch it; otherwise signal "none".
+		future.then(this, function(future) {
+			channelRec = future.result;
+			if (channelRec && channelRec.chatThreadId) {
+				future.nest(MojoDB.get([channelRec.chatThreadId]));
+			} else {
+				future.result = { results: [] };
+			}
+		});
+
+		// 4. Update the existing channel thread, or create it if this is the channel's first message.
+		future.then(this, function(future) {
+			var results = (future.result && future.result.results) || [];
+			if (results.length > 0) {
+				// Existing channel thread: apply the new message (summary/unreadCount/timestamp).
+				var conversation = {
+					_kind: DBModels.Conversations.id,
+					_id: results[0]._id,
+					unreadCount: results[0].unreadCount
+				};
+				Messaging.ChatThread._updateFromNewMessage(conversation, message, { addr: channelAddr });
+				targetConversation = conversation;
+				future.nest(MojoDB.merge([conversation]));
+			} else {
+				// First message for this channel: create its chatthread. normalizedAddress is keyed
+				// on the channel so nothing else is needed to find it again; channelId/serverId are
+				// denormalized so the Servers-tab UI can map thread -> channel -> server.
+				var newConversation = {
+					_kind: DBModels.Conversations.id,
+					timestamp: Date.now(),
+					summary: "",
+					flags: { visible: true, outgoing: false },
+					displayName: (channelRec && channelRec.displayName) || message.serverName || channelAddr,
+					replyAddress: channelAddr,
+					normalizedAddress: Messaging.Utils.normalizeAddress(channelAddr, serviceName),
+					replyService: serviceName,
+					channelId: channelRec && channelRec._id,
+					serverId: serverRec && serverRec._id
+				};
+				Messaging.ChatThread._updateFromNewMessage(newConversation, message, { addr: channelAddr });
+				targetConversation = newConversation;
+				future.nest(MojoDB.put([newConversation]));
+			}
+		});
+
+		// 5. If we created a new thread, capture its _id and link it back onto the imchannel.
+		future.then(this, function(future) {
+			if (targetConversation && targetConversation._id === undefined) {
+				if (future.result.results && future.result.results.length > 0) {
+					targetConversation._id = future.result.results[0].id;
+				}
+				if (channelRec && channelRec._id && targetConversation._id !== undefined) {
+					future.nest(DBModels.ImChannel.setChatThreadId(channelRec._id, targetConversation._id));
+				} else {
+					future.result = true;
+				}
+			} else {
+				future.result = true;
+			}
+		});
+
+		// 6. Resolve to the channel's chatthread.
+		future.then(this, function(future) {
+			if (targetConversation === undefined) {
+				console.error("findOrCreateChannelThread: no conversation resolved for channel " + channelAddr);
+			}
+			future.result = targetConversation;
+		});
+
+		return future;
+	},
+
+	/**
+	 * findOrCreate
 	 * future.result will be an object with _id of the conversation or undefined if something went wrong
 	 */
 	findOrCreate: function(person, message, address) {
+		// Servers/Rooms (Milestone 1): a MUC message tagged by the transport with a channelName
+		// belongs to a CHANNEL (Discord/IRC/Teams/etc.). Route it to the single chatthread for that
+		// channel - keyed on the channel, NOT the per-message sender - so a busy channel stays in
+		// ONE thread instead of the one-thread-per-speaker flattening the address path below would
+		// produce. Gated entirely on channelName, so 1:1 IM / SMS / group-chat threading is
+		// untouched. (Safe to run inline: the new-message assistant drains each batch sequentially
+		// under an activation lock, so no two channel messages create the same channel concurrently.)
+		if (message.channelName) {
+			return DBModels.Conversations.findOrCreateChannelThread(message);
+		}
+
 		// targetConversation references a conversation object that will be the eventual future.result value.
 		// It will be the result of a db.find() or pieced together and _id added as part of a db.put()
 		var conversationList, targetConversation = undefined;

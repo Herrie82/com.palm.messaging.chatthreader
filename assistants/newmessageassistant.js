@@ -221,8 +221,9 @@ var NewMessagesCommandAssistant = Class.create({
 		address = this.convertAddressToObject(address);
 
 		// Fast path: reuse a conversation already resolved for this address in this batch
-		// (1:1/IM only — group chats are keyed on the chat, not a participant address).
-		var cacheKey = (!message.groupChatName && this._convCache) ?
+		// (1:1/IM only — group chats and Server/Room channels are keyed on the chat/channel,
+		// not a participant address, so they must not share a per-address cache entry).
+		var cacheKey = (!message.groupChatName && !message.channelName && this._convCache) ?
 			((address.addr || "") + "|" + (message.serviceName || "")) : null;
 		if (cacheKey && this._convCache[cacheKey]) {
 			var cachedConv = this._convCache[cacheKey];
@@ -276,8 +277,9 @@ var NewMessagesCommandAssistant = Class.create({
 			console.error("contactReverseLookup address is undefined");
 			future = new Future();
 			future.result = undefined;
-		// GroupChat's don't have a person so skip the reverse lookup
-		} else if (message.groupChatName) {
+		// GroupChats and Server/Room channels are keyed on the chat/channel, not a participant,
+		// so skip the (expensive, and here meaningless) contact reverse lookup for them.
+		} else if (message.groupChatName || message.channelName) {
 			future = new Future();
 			future.result = undefined;
 		// Assume it is a phone number if the dbkind is com.palm.smsmessage or com.palm.mmsmessage
