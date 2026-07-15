@@ -9,7 +9,21 @@ var NewMessagesCommandAssistant = Class.create({
 	run: function(future) {
 		this.revision = this.controller.args.revision || 0;
 		console.log("Starting NewMessagesCommandAssistant rev=" + this.revision);
-		
+
+		// Serialize activations. Because each activation now drains a whole page (async db8
+		// work), two overlapping runs would race on a conversation's unreadCount
+		// read-modify-write and lose increments. If another run holds the lock (and it isn't
+		// stale), skip — the active run drains the backlog and the db8 watch re-fires for
+		// anything still unthreaded. Stale-lock guards against a run that dies mid-flight.
+		var now = Date.now();
+		if (NewMessagesCommandAssistant._busyUntil && now < NewMessagesCommandAssistant._busyUntil) {
+			console.info("NewMessagesCommandAssistant: another activation active, skipping");
+			future.result = true;
+			return;
+		}
+		NewMessagesCommandAssistant._busyUntil = now + 60000;
+		this._ownsLock = true;
+
 		// Query for messages not associated with a conversations
 		future.now(this, function(future) {
 			future.nest(DBModels.Messages.findUnthreaded(this.revision));
@@ -24,21 +38,119 @@ var NewMessagesCommandAssistant = Class.create({
 			}
 		*/
 		// Each message can have multiple addresses so it can be associated with multiple conversations.
-		// Process ALL unthreaded messages, not just the first one
 		future.then(this, function(future) {
 			var messageList = future.result ? future.result.results : [];
-			console.info("NewMessagesCommandAssistant: number of unassociated messages: " + messageList.length);
+			console.info("NewMessagesCommandAssistant: number of unassociated mesages: " +messageList.length);
 			if (messageList !== undefined && messageList.length > 0) {
-				var mapFunc = _.bind(this.handleMessage, this);
-				future.nest(mapReduce({map: mapFunc}, messageList));
+				// Thread the WHOLE fetched batch in this single activation instead of only
+				// messageList[0] + complete()/re-watch per message. The old one-at-a-time
+				// design capped throughput at ~1 activity round-trip per message (~1.75 msg/s
+				// measured), so busy group chats / IRC built an unbounded backlog. findUnthreaded
+				// returns the lowest-_rev unthreaded page (<=500) ordered by _rev, so draining
+				// the page and letting the high-water revision advance to its max skips nothing.
+				future.nest(this.handleAllMessages(messageList));
 			} else {
 				future.result = true;
 			}
 		});
 	},
-	
+
+	// Sequentially thread every message from a findUnthreaded page within one activation.
+	// Resolves once the batch is done. Per-message errors are logged and skipped so a
+	// single bad record cannot stall the batch. Chaining is async (each step runs after the
+	// previous message's futures settle), so there is no deep recursion even for a full page.
+	handleAllMessages: function(messageList) {
+		var outer = new Future();
+		var self = this;
+		var i = 0;
+		// Per-batch conversation cache: within one activation, all messages from the same
+		// IM address thread into the same conversation, so resolve the contact + conversation
+		// once and reuse it — avoids a Person.findByIM + Conversations.findOrCreate per message
+		// (the dominant cost once the activity round-trip is amortized). Not used for group
+		// chats (keyed on the chat, not a participant address).
+		this._convCache = {};
+		// Write-batching accumulators, flushed once at end of the activation:
+		//  _dirtyConvs  — conversations updated in-memory by cache hits (summary/unreadCount);
+		//                 one MojoDB.merge for all of them instead of one per message.
+		//  _msgMerges   — the per-message {_id,conversations} links; one MojoDB.merge for all.
+		this._dirtyConvs = {};
+		this._msgMerges = [];
+		function step() {
+			for (;;) {
+				if (i >= messageList.length) {
+					self.flushBatch(outer);
+					return;
+				}
+				var msg = messageList[i++];
+				var f;
+				try {
+					f = self.handleMessage(msg);
+				} catch (e) {
+					console.error("NewMessagesCommandAssistant: handleMessage threw, skipping: " + e);
+					continue;
+				}
+				f.then(function(inner) {
+					try { var r = inner.result; } catch (e) {
+						console.error("NewMessagesCommandAssistant: message future error, skipping: " + e);
+					}
+					step();
+				});
+				return;
+			}
+		}
+		step();
+		return outer;
+	},
+
+	// Persist the whole activation's accumulated writes in at most two db8 calls:
+	// one merge for every conversation whose summary/unreadCount changed via a cache hit,
+	// then one merge for all the message->conversation links. Replaces up to two db8
+	// writes per message with two per batch.
+	flushBatch: function(outer) {
+		var convMerges = [];
+		var dirty = this._dirtyConvs || {};
+		for (var k in dirty) {
+			if (dirty.hasOwnProperty(k)) {
+				var c = dirty[k];
+				// Merge by _id (last-write-wins). Drop _rev so a stale cached revision
+				// (findOrCreate bumped it when it first wrote the thread) can't reject the merge.
+				if (c._rev !== undefined) { delete c._rev; }
+				convMerges.push(c);
+			}
+		}
+		var msgMerges = this._msgMerges || [];
+		this._dirtyConvs = {};
+		this._msgMerges = [];
+		console.info("NewMessagesCommandAssistant: flushBatch convMerges=" + convMerges.length +
+			" msgMerges=" + msgMerges.length);
+
+		var chain = new Future();
+		chain.now(function(future) {
+			if (convMerges.length > 0) { future.nest(MojoDB.merge(convMerges)); }
+			else { future.result = true; }
+		});
+		chain.then(function(future) {
+			try { var r = future.result; } catch (e) {
+				console.error("NewMessagesCommandAssistant: flushBatch conversation merge error: " + e);
+			}
+			if (msgMerges.length > 0) { future.nest(MojoDB.merge(msgMerges)); }
+			else { future.result = true; }
+		});
+		chain.then(function(future) {
+			try { var r2 = future.result; } catch (e) {
+				console.error("NewMessagesCommandAssistant: flushBatch message merge error: " + e);
+			}
+			outer.result = true;
+		});
+	},
+
 	// Complete the activity with restart
 	complete: function(activity) {
+		// Release the serialization lock (only the run that took it may clear it).
+		if (this._ownsLock) {
+			NewMessagesCommandAssistant._busyUntil = 0;
+			this._ownsLock = false;
+		}
 		console.info("NewMessagesCommandAssistant:complete activity " + activity._activityId + ", rev="+this.revision);
 		var restartParams = {
 			activityId: activity._activityId,
@@ -104,9 +216,28 @@ var NewMessagesCommandAssistant = Class.create({
 	 */
 	handleMessageAndAddress: function(message, address) {
 		var outerFuture = new Future();
-		//console.info("handleMessageAndAddress looking for " +JSON.stringify(address));			
+		var self = this;
+		//console.info("handleMessageAndAddress looking for " +JSON.stringify(address));
 		address = this.convertAddressToObject(address);
-		
+
+		// Fast path: reuse a conversation already resolved for this address in this batch
+		// (1:1/IM only — group chats are keyed on the chat, not a participant address).
+		var cacheKey = (!message.groupChatName && this._convCache) ?
+			((address.addr || "") + "|" + (message.serviceName || "")) : null;
+		if (cacheKey && this._convCache[cacheKey]) {
+			var cachedConv = this._convCache[cacheKey];
+			// Keep the thread's summary/timestamp/unreadCount correct across the burst by
+			// applying the same in-memory update findOrCreate would (it increments unreadCount
+			// and sets the latest summary). Mark the conversation dirty so flushBatch persists
+			// the final state once, and collect the message link for the batched merge.
+			Messaging.ChatThread._updateFromNewMessage(cachedConv, message, address);
+			this._dirtyConvs[cacheKey] = cachedConv;
+			outerFuture.now(this, function(future) {
+				future.nest(DBModels.Messages.addConversation(message, cachedConv, undefined, self._msgMerges));
+			});
+			return outerFuture;
+		}
+
 		// Do contacts reverse lookup
 		outerFuture.now(this, function(future) {
 			console.info("handleMessageAndAddress: nesting contactReverseLookup ");
@@ -119,14 +250,15 @@ var NewMessagesCommandAssistant = Class.create({
 			var person  = this.getPerson(future);
 			future.nest(DBModels.Conversations.findOrCreate(person, message, address));
 		});
-		
-		// Associate the message with the conversation 
+
+		// Associate the message with the conversation
 		outerFuture.then(function(future) {
 			var conversation = future.result;
 			if (conversation) {
 				var id = conversation && conversation._id;
 				console.info("handleMessageAndAddress: got conversation id=" + id);
-				future.nest(DBModels.Messages.addConversation(message, conversation));
+				if (cacheKey) { self._convCache[cacheKey] = conversation; }
+				future.nest(DBModels.Messages.addConversation(message, conversation, undefined, self._msgMerges));
 			} else {
 				future.result = true;
 			}
@@ -179,11 +311,10 @@ var NewMessagesCommandAssistant = Class.create({
 					} else {
 						future.nest(this.findPersonForAccount(myUsername, message.serviceName, results));
 					}
-				} else if (results.length === 1) {
-					// Single person found - return it
-					future.result = results[0];
+				} else {
+					//result is empty or just a single person.
+					future.result = future.result;
 				}
-				// else: empty results - future.result already contains empty array
 			});
 		}
 		return future;
@@ -295,3 +426,5 @@ var NewMessagesCommandAssistant = Class.create({
 });
 
 NewMessagesCommandAssistant.SmsOrMmsRegex = /^com\.palm\.(sms|mms)message/;
+// Shared serialization lock (epoch ms until which an activation holds it); 0 = free.
+NewMessagesCommandAssistant._busyUntil = 0;

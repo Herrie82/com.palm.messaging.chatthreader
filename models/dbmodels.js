@@ -43,7 +43,11 @@ DBModels.Messages = {
 	 * addConversation 
 	 * future.result = -1 if something went wrong
 	 */
-	addConversation: function(message, conversation, noNotification) {
+	// If a "collector" array is supplied, the per-message merge object is pushed onto it and
+	// the future resolves immediately (no db8 write). The caller then flushes the whole batch
+	// with a single MojoDB.merge — collapsing N per-message writes into one. Without a collector
+	// the behaviour is identical to before (one merge per call).
+	addConversation: function(message, conversation, noNotification, collector) {
 		console.info("DBModels.Messages.addConversation: start");
 //		console.info("message="+JSON.stringify(message));
 		var future = new Future();
@@ -51,7 +55,7 @@ DBModels.Messages = {
 		if (!message.conversations) {
 			message.conversations = [];
 		}
-		
+
 		var id = conversation._id;
 		if (id === undefined) {
 			console.error("DBModels.Messages.addConversation: id is undefined");
@@ -61,17 +65,21 @@ DBModels.Messages = {
 			if (index !== -1) {
 				// Already exists
 				console.info("DBModels.Messages.addConversation: conversation '"+id+"' already exists at index "+index);
-				future.result = 1; // simulate a successful merge 
+				future.result = 1; // simulate a successful merge
 			} else {
 				message.conversations.push(id);
 				console.info("DBModels.Messages.addConversation: add conversation id "+id+" now "+JSON.stringify(message.conversations));
-				future = MojoDB.merge([
-					{
-						_id: message._id,
-						conversations: message.conversations,
-						flags: {noNotification: noNotification}
-					}
-				]);
+				var mergeObj = {
+					_id: message._id,
+					conversations: message.conversations,
+					flags: {noNotification: noNotification}
+				};
+				if (collector) {
+					collector.push(mergeObj);
+					future.result = 1; // deferred to the caller's batched flush
+				} else {
+					future = MojoDB.merge([mergeObj]);
+				}
 			}
 		}
 
@@ -281,9 +289,13 @@ DBModels.Conversations = {
 			// Result could be {} if the conversation doesn't exist
 			if (conversationList.length > 0) {
 				targetConversation = conversationList[0];
-				conversation._id = targetConversation._id;				
+				conversation._id = targetConversation._id;
 				conversation.unreadCount = conversationList[0].unreadCount;
 				Messaging.ChatThread._updateFromNewMessage(conversation, message, address);
+				// Return the object we actually incremented (not the pre-increment db record),
+				// so callers that reuse the result see the applied summary/unreadCount. Stock
+				// re-read per message so it never mattered; the batched path caches this object.
+				targetConversation = conversation;
 				future.nest(MojoDB.merge([conversation]));
 			} else if (message.groupChatName) {
 				// The chatthread for this groupchat doesn't yet exist so put the message
