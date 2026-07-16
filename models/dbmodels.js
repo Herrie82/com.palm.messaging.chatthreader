@@ -289,7 +289,7 @@ DBModels.Conversations = {
 					timestamp: Date.now(),
 					summary: "",
 					flags: { visible: true, outgoing: false },
-					displayName: (channelRec && channelRec.displayName) || message.serverName || channelAddr,
+					displayName: (channelRec && channelRec.displayName) || message.channelDisplayName || message.serverName || channelAddr,
 					replyAddress: channelAddr,
 					normalizedAddress: Messaging.Utils.normalizeAddress(channelAddr, serviceName),
 					replyService: serviceName,
@@ -401,6 +401,12 @@ DBModels.Conversations = {
 				targetConversation = conversationList[0];
 				conversation._id = targetConversation._id;
 				conversation.unreadCount = conversationList[0].unreadCount;
+				// Self-heal the display name: if the sender name carries astral emoji the transport
+				// supplies an encoded copy as address.name. Refresh displayName from it so existing
+				// emoji-named chats stop showing tofu on their next message. Match key untouched.
+				if (!message.groupChatName && address.name && targetConversation.displayName !== address.name) {
+					conversation.displayName = address.name;
+				}
 				Messaging.ChatThread._updateFromNewMessage(conversation, message, address);
 				// Return the object we actually incremented (not the pre-increment db record),
 				// so callers that reuse the result see the applied summary/unreadCount. Stock

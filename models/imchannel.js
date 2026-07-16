@@ -43,11 +43,11 @@ DBModels.ImChannel = {
 					serverId: serverRecId,
 					parentId: null,
 					type: "channel",
-					// No human channel name is available from the transport yet (purple-discord's
-					// conversation name is the channel snowflake), so seed name with the remote id
-					// and displayName with the server name; a later milestone can refine these.
+					// name = the stable remote key (channelName: Discord snowflake, Telegram chat-<id>).
+					// displayName prefers the transport-supplied human room title (channelDisplayName,
+					// e.g. the Telegram group name); falls back to the server name, then the raw id.
 					name: remoteId,
-					displayName: message.serverName || remoteId,
+					displayName: message.channelDisplayName || message.serverName || remoteId,
 					position: 0
 				};
 				future.nest(MojoDB.put([channelRecord]));
