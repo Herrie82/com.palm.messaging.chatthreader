@@ -34,7 +34,26 @@ DBModels.ImChannel = {
 			if (list.length > 0) {
 				// Existing channel - reuse it (already carries its _id and chatThreadId if linked).
 				channelRecord = list[0];
-				future.result = channelRecord;
+				// Self-heal: a channel first seen via an old-transport message (or before its title
+				// was known) can carry a stale displayName (e.g. the server name "Chats") or sit under
+				// a stale server. If this message now supplies a real channelDisplayName that differs,
+				// or a different server, refresh them in place so the channel stops showing "Chats"/the
+				// raw id and moves under the current server. Match key (remoteId) is untouched.
+				var patch = null;
+				var dn = message.channelDisplayName;
+				if (dn && channelRecord.displayName !== dn) {
+					patch = patch || { _id: channelRecord._id };
+					patch.displayName = dn; channelRecord.displayName = dn;
+				}
+				if (serverRecId && channelRecord.serverId !== serverRecId) {
+					patch = patch || { _id: channelRecord._id };
+					patch.serverId = serverRecId; channelRecord.serverId = serverRecId;
+				}
+				if (patch) {
+					future.nest(MojoDB.merge([patch]));
+				} else {
+					future.result = channelRecord;
+				}
 			} else {
 				channelRecord = {
 					_kind: DBModels.ImChannel.id,

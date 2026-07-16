@@ -277,6 +277,11 @@ DBModels.Conversations = {
 					_id: results[0]._id,
 					unreadCount: results[0].unreadCount
 				};
+				// Self-heal the thread's display name from the (now-refreshed) imchannel, so a channel
+				// first threaded under a stale name (e.g. "Chats") updates to its real title next message.
+				if (channelRec && channelRec.displayName && results[0].displayName !== channelRec.displayName) {
+					conversation.displayName = channelRec.displayName;
+				}
 				Messaging.ChatThread._updateFromNewMessage(conversation, message, { addr: channelAddr });
 				targetConversation = conversation;
 				future.nest(MojoDB.merge([conversation]));
