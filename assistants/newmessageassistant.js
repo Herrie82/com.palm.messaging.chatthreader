@@ -185,6 +185,28 @@ var NewMessagesCommandAssistant = Class.create({
 			this.revision = message._rev;
 		}
 
+		// SELF-HEAL / loop-breaker. A message that keeps returning unthreaded across activations is a
+		// poison record (bad data, or a stuck db state - e.g. a conversation the resolver can't settle).
+		// Left alone it re-fires the db8 watch forever: 100% CPU + log flood (as happened once after a
+		// mid-thread reboot). We count sightings per _id in a static that survives activations; after a
+		// few tries we STOP trusting the normal resolver (that's where the poison lives) and merge a
+		// stable sentinel conversation straight onto the message. That makes it fail findUnthreaded's
+		// "conversations = null" test forever, so the activity settles no matter what. The merge carries
+		// no _rev so it can't be rejected. Worst case the message is parked (not mis-threaded), and the
+		// error log names it + its channel so the underlying record can be looked at later.
+		var seen = NewMessagesCommandAssistant._seenCounts || (NewMessagesCommandAssistant._seenCounts = {});
+		NewMessagesCommandAssistant._seenCalls = (NewMessagesCommandAssistant._seenCalls || 0) + 1;
+		// Periodic hygiene so the map can't grow unbounded; a genuine loop spikes one _id to the
+		// threshold in a handful of activations, long before this reset could interfere.
+		if (NewMessagesCommandAssistant._seenCalls % 5000 === 0) { seen = NewMessagesCommandAssistant._seenCounts = {}; }
+		var seenN = seen[message._id] = (seen[message._id] || 0) + 1;
+		if (seenN >= 5) {
+			console.error("NewMessagesCommandAssistant: SELF-HEAL breaking re-thread loop on stuck message " +
+				message._id + " (seen " + seenN + "x, chan=" + message.channelName + "); parking it in the self-healed sentinel thread");
+			delete seen[message._id];
+			return MojoDB.merge([{ _id: message._id, conversations: [DBModels.kSelfHealedThreadId] }]);
+		}
+
 		var addressList = Messaging.Message.getAddressesForThreading(message);
 		if (addressList.length > 0) {
 			//console.info("NewMessagesCommandAssistant: mapReduce on " + JSON.stringify(message));

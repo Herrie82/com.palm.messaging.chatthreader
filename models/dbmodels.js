@@ -695,6 +695,13 @@ DBModels.BuddyStatus = {
 };
 
 DBModels.kMessagePendingGroupChatId = "pending_groupchat";
+// Sentinel conversation id used by the chatthreader SELF-HEAL loop-breaker: a message parked here
+// (conversations = [this]) can never match findUnthreaded's "conversations = null" again, so a
+// poison record can't spin the newMessages activity forever. No real conversation record uses this
+// id - parked messages are simply not shown under any thread, which is fine (they were looping /
+// invisible anyway). Deliberately NOT the pending_groupchat id, so resetPendingGroupChatMessages
+// never re-nulls a self-healed message back into the loop.
+DBModels.kSelfHealedThreadId = "self_healed_orphan";
 
 /*********************************************************************************************
 Person 
