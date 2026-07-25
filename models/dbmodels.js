@@ -391,7 +391,23 @@ DBModels.Conversations = {
 		}
 
 		var chatFuture = MojoDB.find(query, false);
-		
+
+		// A 1:1 thread created BEFORE its contact was linked is keyed on the raw address and has no
+		// personId, so the personId-keyed lookup above misses it once the person resolves — which would
+		// fork a duplicate, number-named thread. When the person is now known but no personId-keyed
+		// thread exists, re-query by address and ADOPT that pre-person thread instead of duplicating it.
+		if (person && person._id !== undefined) {
+			chatFuture.then(function(future) {
+				var list = (future.result && future.result.results) || [];
+				if (list.length === 0 && !message.groupChatName) {
+					future.nest(MojoDB.find({ from: DBModels.Conversations.id,
+						where: [{prop:"normalizedAddress", op:"%", val:normalizedAddress}] }, false));
+				} else {
+					future.result = future.result;
+				}
+			});
+		}
+
 		// Either update the existing conversation or create a new one
 		chatFuture.then(function(future) {
 			conversationList = future.result.results || [];
@@ -411,6 +427,15 @@ DBModels.Conversations = {
 				// emoji-named chats stop showing tofu on their next message. Match key untouched.
 				if (!message.groupChatName && address.name && targetConversation.displayName !== address.name) {
 					conversation.displayName = address.name;
+				}
+				// Adopt a pre-person thread: if we now have a person this thread wasn't linked to, stamp
+				// its real contact name so it stops showing the bare address (personId itself is already
+				// set on `conversation` above via personId: person._id). Only fires on first adoption
+				// (personId differs), so an already-linked thread's name is never disturbed.
+				if (person && person._id !== undefined && targetConversation.personId !== person._id &&
+				    ContactsLib && ContactsLib.Person && ContactsLib.Person.generateDisplayNameFromRawPerson) {
+					var pdn = ContactsLib.Person.generateDisplayNameFromRawPerson(person);
+					if (pdn && pdn.length > 0) { conversation.displayName = pdn; }
 				}
 				Messaging.ChatThread._updateFromNewMessage(conversation, message, address);
 				// Return the object we actually incremented (not the pre-increment db record),
