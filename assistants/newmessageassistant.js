@@ -294,6 +294,7 @@ var NewMessagesCommandAssistant = Class.create({
 		//console.info("contactReverseLookup " +JSON.stringify(params)+ "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
 		var address = params.addr;
 		var future;
+		var self = this;
 
 		if (address === undefined) {
 			console.error("contactReverseLookup address is undefined");
@@ -335,12 +336,57 @@ var NewMessagesCommandAssistant = Class.create({
 					} else {
 						future.nest(this.findPersonForAccount(myUsername, message.serviceName, results));
 					}
+				} else if (results.length === 0) {
+					// webOS: Person.findByIM normalizes a WhatsApp address by STRIPPING the leading "+"
+					// (Messaging.Utils.normalizeAddress, type_whatsapp branch), but a contact's WhatsApp im
+					// can be stored with the "+" KEPT in its normalizedValue (e.g. an aggregate person
+					// merged with a CardDAV/Google contact). findByIM then misses, so an outgoing-only
+					// thread (no incoming from.name to fall back on) never links and shows the bare number.
+					// imbuddystatus is the authoritative buddy->person link, keyed on the EXACT raw username,
+					// and already carries personId + displayName (set by a different, exact-match path).
+					// Fall back to it so the thread gets associated with the real contact.
+					future.nest(self.findPersonViaBuddy(address, message.serviceName));
 				} else {
-					//result is empty or just a single person.
+					//result is just a single person.
 					future.result = future.result;
 				}
 			});
 		}
+		return future;
+	},
+
+	// Resolve a person via the linked buddy (imbuddystatus) when Person.findByIM can't (normalization
+	// mismatch). Matches the buddy by its exact raw username + serviceName; if it carries a personId,
+	// returns that person as a raw object so the caller associates the thread. Resolves to undefined on
+	// a miss (indexed lookup mirrors personChanged.addPersonIdToBuddy's query, so no new index needed).
+	findPersonViaBuddy: function(address, serviceName) {
+		var future = TempDB.find({
+			from: "com.palm.imbuddystatus:1",
+			where: [
+				{ prop: "username", op: "=", val: address },
+				{ prop: "serviceName", op: "=", val: serviceName }
+			]
+		}, false);
+		future.then(this, function(future) {
+			var buddies = (future.result && future.result.results) || [];
+			var personId;
+			for (var i = 0; i < buddies.length; ++i) {
+				if (buddies[i].personId) { personId = buddies[i].personId; break; }
+			}
+			if (!personId) {
+				future.result = undefined;
+				return;
+			}
+			console.info("contactReverseLookup: resolved person " + personId + " via imbuddystatus for " + address);
+			future.nest(MojoDB.get([personId]));
+		});
+		future.then(this, function(future) {
+			var res = future.result;
+			if (res && res.results) {
+				future.result = (res.results.length > 0) ? res.results[0] : undefined;
+			}
+			// else: already undefined (buddy miss) -> pass through
+		});
 		return future;
 	},
 	

@@ -13,6 +13,15 @@
 DBModels.ImChannel = {
 	id: "com.palm.imchannel:1",
 
+	// webOS: a WhatsApp group whose subject hasn't been fetched yet (during post-connect backfill)
+	// can surface with its raw JID as the "display name" ("<digits>-<digits>@g.us"), or with the
+	// display name equal to the match key. NEVER let that raw id become or overwrite the channel's
+	// human name -- keep the existing good name until a message supplies the real subject. The
+	// transport now suppresses this at the source too; this is the belt-and-suspenders half.
+	_isRawId: function(dn, remoteId) {
+		return !dn || dn === remoteId || /^\d+(-\d+)?@g\.us$/.test(dn);
+	},
+
 	// Resolve the imchannel record for a channel message, creating it if absent. serverRecId is the
 	// _id of the owning imserver. future.result = the imchannel record (with _id).
 	findOrCreate: function(message, serverRecId) {
@@ -41,7 +50,7 @@ DBModels.ImChannel = {
 				// raw id and moves under the current server. Match key (remoteId) is untouched.
 				var patch = null;
 				var dn = message.channelDisplayName;
-				if (dn && channelRecord.displayName !== dn) {
+				if (dn && !DBModels.ImChannel._isRawId(dn, remoteId) && channelRecord.displayName !== dn) {
 					patch = patch || { _id: channelRecord._id };
 					patch.displayName = dn; channelRecord.displayName = dn;
 				}
@@ -66,7 +75,11 @@ DBModels.ImChannel = {
 					// displayName prefers the transport-supplied human room title (channelDisplayName,
 					// e.g. the Telegram group name); falls back to the server name, then the raw id.
 					name: remoteId,
-					displayName: message.channelDisplayName || message.serverName || remoteId,
+					// NB: do NOT fall back to remoteId (the raw JID) -- leave displayName unset when no
+					// human name is known yet, so the thread self-heal (which copies channelRec.displayName)
+					// never propagates the JID. A later named message fills it in via the update branch.
+					displayName: (message.channelDisplayName && !DBModels.ImChannel._isRawId(message.channelDisplayName, remoteId)) ?
+						message.channelDisplayName : message.serverName,
 					position: 0
 				};
 				future.nest(MojoDB.put([channelRecord]));

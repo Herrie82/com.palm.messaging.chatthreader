@@ -279,7 +279,7 @@ DBModels.Conversations = {
 				};
 				// Self-heal the thread's display name from the (now-refreshed) imchannel, so a channel
 				// first threaded under a stale name (e.g. "Chats") updates to its real title next message.
-				if (channelRec && channelRec.displayName && results[0].displayName !== channelRec.displayName) {
+				if (channelRec && channelRec.displayName && !DBModels.ImChannel._isRawId(channelRec.displayName, channelAddr) && results[0].displayName !== channelRec.displayName) {
 					conversation.displayName = channelRec.displayName;
 				}
 				Messaging.ChatThread._updateFromNewMessage(conversation, message, { addr: channelAddr });
