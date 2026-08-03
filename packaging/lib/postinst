@@ -14,10 +14,10 @@ mount -o remount,rw /dev/mapper/store-root / 2>/dev/null
 mount -o remount,rw / 2>/dev/null
 
 OV=""
-for d in /media/cryptofs/chatthreader-overwrite/*/; do
+for d in /media/cryptofs/chatthreader-overwrite/*/ /media/cryptofs/apps/media/cryptofs/chatthreader-overwrite/*/; do
   [ -f "${d}dest.txt" ] && OV="${d%/}" && break
 done
-[ -n "$OV" ] || { echo "!! no /media/cryptofs/chatthreader-overwrite/*/dest.txt found, nothing to install" >&2; exit 1; }
+[ -n "$OV" ] || { echo "!! no chatthreader-overwrite/*/dest.txt found (checked direct + offline-root paths), nothing to install" >&2; exit 1; }
 
 DST="$(cat "$OV/dest.txt")"
 BAK="$BAK_ROOT$(echo "$DST" | tr '/' '_').tar"

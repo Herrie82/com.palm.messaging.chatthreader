@@ -12,7 +12,7 @@ mount -o remount,rw /dev/mapper/store-root / 2>/dev/null
 mount -o remount,rw / 2>/dev/null
 
 OV=""
-for d in /media/cryptofs/chatthreader-overwrite/*/; do
+for d in /media/cryptofs/chatthreader-overwrite/*/ /media/cryptofs/apps/media/cryptofs/chatthreader-overwrite/*/; do
   [ -f "${d}dest.txt" ] && OV="${d%/}" && break
 done
 
