@@ -438,6 +438,22 @@ DBModels.Conversations = {
 					if (pdn && pdn.length > 0) { conversation.displayName = pdn; }
 				}
 				Messaging.ChatThread._updateFromNewMessage(conversation, message, address);
+				// webOS: an INCOMING message must surface its conversation even if the thread was left
+				// hidden (a stale service thread visible:false from a prior session) or the message is
+				// flagged invisible. _updateFromNewMessage early-returns for invisible messages
+				// (Messaging.Message.isVisible === false) -- e.g. the Telegram login-code/2FA prompt the
+				// plugin posts to the "Telegram" service chat as a PURPLE_MESSAGE_SYSTEM message -- so a
+				// reused hidden thread stays hidden and the user can't see/reply to the prompt, stalling
+				// login. Force it visible on any inbox message, and if the update was skipped, surface the
+				// prompt text so the conversation is recognizable in the list.
+				if (message.folder === "inbox") {
+					if (!conversation.flags) { conversation.flags = {}; }
+					conversation.flags.visible = true;
+					if (conversation.summary === undefined && message.messageText) {
+						conversation.summary = message.messageText;
+						conversation.timestamp = message.localTimestamp || conversation.timestamp;
+					}
+				}
 				// Return the object we actually incremented (not the pre-increment db record),
 				// so callers that reuse the result see the applied summary/unreadCount. Stock
 				// re-read per message so it never mattered; the batched path caches this object.
@@ -458,6 +474,19 @@ DBModels.Conversations = {
 				}
 
 				Messaging.ChatThread._updateFromNewMessage(conversation, message, address);
+
+				// webOS: see the inbox-visible note above -- a NEW thread created from an invisible
+				// incoming message (e.g. a Telegram auth prompt when no prior thread exists) must still
+				// be visible so the user can see/reply to it.
+				if (message.folder === "inbox") {
+					if (!conversation.flags) { conversation.flags = {}; }
+					conversation.flags.visible = true;
+					if (conversation.summary === undefined && message.messageText) {
+						conversation.summary = message.messageText;
+						conversation.timestamp = message.localTimestamp || conversation.timestamp;
+						conversation.replyService = conversation.replyService || message.serviceName;
+					}
+				}
 
 				targetConversation = conversation;
 
