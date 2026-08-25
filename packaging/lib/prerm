@@ -5,12 +5,19 @@
 # /media/cryptofs/chatthreader-overwrite/<pkg-name>/dest.txt (part of this package's payload) is still present
 # and readable here.
 set +e
+# Anchor at / -- the App Installer runs this with cwd set to a directory the removal below can
+# delete; GNU tar then fails getcwd() before honouring -C and the restore "fails". See
+# postinst's matching comment (GH issue #4).
+cd /
 BAK_ROOT=/media/cryptofs/chatthreader-backup
 log() { echo "[chatthreader] $*"; }
 
 mount -o remount,rw /dev/mapper/store-root / 2>/dev/null
 mount -o remount,rw / 2>/dev/null
 
+# See postinst's matching comment: pmPreRemove.script (this file, via make-ipk.sh) is what
+# Preware/WebOS Quick Install actually run, and under their offline-root ipkg invocation, staged
+# content can land at either the direct path or the /media/cryptofs/apps-prefixed one.
 case "$0" in
   */pmPreRemove.script) PKGID="$(basename "$(dirname "$0")")" ;;
   *.prerm) PKGID="$(basename "$0" .prerm)" ;;
@@ -29,14 +36,38 @@ if [ -z "$OV" ]; then
   done
 fi
 
-if [ -n "$OV" ]; then
-  DST="$(cat "$OV/dest.txt")"
+# postinst deletes $OV as its last act (so a later package's glob can't find a stale
+# subdirectory), which means the lookups above find NOTHING on any normal uninstall -- the restore
+# below was silently skipped and the replaced service was left in place forever, with its backup
+# orphaned (GH issue #2). Fall back to the destination postinst recorded outside $OV for exactly
+# this kind of lookup.
+DST=""
+[ -n "$OV" ] && DST="$(cat "$OV/dest.txt")"
+LASTDEST="/media/cryptofs/chatthreader-overwrite/.last-installed/$PKGID.dest.txt"
+if [ -z "$DST" ] && [ -n "$PKGID" ] && [ -f "$LASTDEST" ]; then
+  DST="$(cat "$LASTDEST")"
+fi
+
+# Both sources are file contents, and everything below starts with rm -rf: refuse anything that is
+# not an absolute path.
+case "$DST" in /?*) ;; *) DST="" ;; esac
+
+# The preserve list normally lives in $OV too; on the LASTDEST fallback path use the copy postinst
+# persisted beside the marker.
+PLIST=""
+if [ -n "$OV" ] && [ -s "$OV/preserve.txt" ]; then
+  PLIST="$OV/preserve.txt"
+elif [ -n "$PKGID" ] && [ -s "/media/cryptofs/chatthreader-overwrite/.last-installed/$PKGID.preserve.txt" ]; then
+  PLIST="/media/cryptofs/chatthreader-overwrite/.last-installed/$PKGID.preserve.txt"
+fi
+
+if [ -n "$DST" ]; then
   BAK="$BAK_ROOT$(echo "$DST" | tr '/' '_').tar"
 
   # Carry any live runtime data (see postinst) across the restore/removal too, instead of
   # reverting it to whatever the stock backup tar happened to hold at first-install time.
   PRESERVE_TMP=""
-  if [ -s "$OV/preserve.txt" ]; then
+  if [ -n "$PLIST" ]; then
     PRESERVE_TMP="$(mktemp -d)"
     while IFS= read -r rel; do
       [ -n "$rel" ] || continue
@@ -44,7 +75,7 @@ if [ -n "$OV" ]; then
         mkdir -p "$PRESERVE_TMP/$(dirname "$rel")"
         mv "$DST/$rel" "$PRESERVE_TMP/$rel"
       fi
-    done < "$OV/preserve.txt"
+    done < "$PLIST"
   fi
 
   rm -rf "$DST"
@@ -64,12 +95,21 @@ if [ -n "$OV" ]; then
         rm -rf "$DST/$rel"
         mv "$PRESERVE_TMP/$rel" "$DST/$rel"
       fi
-    done < "$OV/preserve.txt"
+    done < "$PLIST"
     rm -rf "$PRESERVE_TMP"
   fi
+
+  # Only now are the recorded markers expendable. Leaving them would make a SECOND uninstall call
+  # (WOSQI is known to make one) rm -rf the stock service that the first call just restored.
+  rm -f "$LASTDEST" "/media/cryptofs/chatthreader-overwrite/.last-installed/$PKGID.preserve.txt"
 fi
 
-luna-send -n 1 luna://com.palm.applicationManager/rescan '{}' >/dev/null 2>&1
+# Fire-and-forget -- NEVER wait for this one. `luna-send -n 1` blocks until applicationManager
+# replies, but under the App Installer this script runs INSIDE LunaSysMgr's own request handling,
+# so the service that owes the reply is the same one waiting for this script to exit. Nothing
+# times out, so the install chain and the UI both hang forever (GH issue #6, observed live). The
+# rescan is only a nudge -- launch it and move on.
+( luna-send -n 1 luna://com.palm.applicationManager/rescan '{}' >/dev/null 2>&1 & ) >/dev/null 2>&1
 
 # Deliberately NOT remounting root back to read-only here -- same reasoning as postinst.
 log "removal complete."
